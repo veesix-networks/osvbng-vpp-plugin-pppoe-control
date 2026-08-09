@@ -447,6 +447,12 @@ int vnet_osvbng_pppoe_add_del_session
 
       vnet_sw_interface_t *si = vnet_get_sw_interface (vnm, sw_if_index);
       si->flags &= ~VNET_SW_INTERFACE_FLAG_HIDDEN;
+
+      /* Parent on the encap sub-interface so a sup_sw_if_index walk reaches
+       * the port; covers fresh and recycled interfaces alike. Must stay after
+       * vnet_register_interface(): its create callbacks must see sup == self. */
+      si->sup_sw_if_index = a->encap_if_index;
+
       vnet_sw_interface_set_flags (vnm, sw_if_index,
                                    VNET_SW_INTERFACE_FLAG_ADMIN_UP);
       vnet_set_interface_l3_output_node (vnm->vlib_main, sw_if_index,
@@ -491,6 +497,10 @@ int vnet_osvbng_pppoe_add_del_session
       vnet_sw_interface_set_flags (vnm, t->sw_if_index, 0 /* down */ );
       vnet_sw_interface_t *si = vnet_get_sw_interface (vnm, t->sw_if_index);
       si->flags |= VNET_SW_INTERFACE_FLAG_HIDDEN;
+
+      /* Unparent before parking on the free list: the interface outlives the
+       * session and its encap may be deleted meanwhile. Reuse re-parents it. */
+      si->sup_sw_if_index = t->sw_if_index;
 
       vec_add1 (pem->free_pppoe_session_hw_if_indices, t->hw_if_index);
 
