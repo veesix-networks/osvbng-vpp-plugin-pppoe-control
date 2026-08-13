@@ -216,7 +216,15 @@ pppoe_update_adj (vnet_main_t * vnm, u32 sw_if_index, adj_index_t ai)
   ASSERT (ADJ_INDEX_INVALID != ai);
 
   adj = adj_get (ai);
-  session_id = pem->session_index_by_sw_if_index[sw_if_index];
+
+  /* A parked (recycled) session interface has no session behind it. A
+   * re-resolve there must not chase a wild pool index; left unstacked,
+   * the adj resolves through drop until a session owns the interface. */
+  if (sw_if_index >= vec_len (pem->session_index_by_sw_if_index) ||
+      (session_id = pem->session_index_by_sw_if_index[sw_if_index]) == ~0 ||
+      pool_is_free_index (pem->sessions, session_id))
+    return;
+
   t = pool_elt_at_index (pem->sessions, session_id);
 
   /* Calculate offset to PPPoE header for fixup */
@@ -493,6 +501,23 @@ int vnet_osvbng_pppoe_add_del_session
       if (t->is_lac_tunneled && pem->lac_session_count > 0)
         pem->lac_session_count--;
 
+      /* Teardown order: stop resolution first (decap table, session map),
+       * then forwarding (FIB path, which unstacks the midchain by
+       * refcount), then interface state, and free the pool entry last so
+       * nothing can resolve to it mid-dismantle. */
+      pppoe_delete_1 (&pem->session_table,
+                      a->client_mac, clib_host_to_net_u16 (a->session_id));
+
+      pem->session_index_by_sw_if_index[t->sw_if_index] = ~0;
+
+      /* delete reverse route for client ip */
+      fib_table_entry_path_remove (a->decap_fib_index, &pfx,
+                                   pppoe_fib_src,
+                                   fib_proto_to_dpo (pfx.fp_proto),
+                                   &pfx.fp_addr,
+                                   sw_if_index, ~0, 1,
+                                   FIB_ROUTE_PATH_FLAG_NONE);
+
       vnet_reset_interface_l3_output_node (vnm->vlib_main, sw_if_index);
       vnet_sw_interface_set_flags (vnm, t->sw_if_index, 0 /* down */ );
       vnet_sw_interface_t *si = vnet_get_sw_interface (vnm, t->sw_if_index);
@@ -503,19 +528,6 @@ int vnet_osvbng_pppoe_add_del_session
       si->sup_sw_if_index = t->sw_if_index;
 
       vec_add1 (pem->free_pppoe_session_hw_if_indices, t->hw_if_index);
-
-      pem->session_index_by_sw_if_index[t->sw_if_index] = ~0;
-
-      pppoe_delete_1 (&pem->session_table,
-                      a->client_mac, clib_host_to_net_u16 (a->session_id));
-
-      /* delete reverse route for client ip */
-      fib_table_entry_path_remove (a->decap_fib_index, &pfx,
-                                   pppoe_fib_src,
-                                   fib_proto_to_dpo (pfx.fp_proto),
-                                   &pfx.fp_addr,
-                                   sw_if_index, ~0, 1,
-                                   FIB_ROUTE_PATH_FLAG_NONE);
 
       pool_put (pem->sessions, t);
     }
